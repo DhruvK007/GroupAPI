@@ -13,6 +13,7 @@ namespace GroupAPI.Data
         public DbSet<GroupExpense> GroupExpenses { get; set; }
         public DbSet<ExpenseSplit> ExpenseSplits { get; set; }
         public DbSet<Payment> Payments { get; set; }
+        public DbSet<JoinRequest>JoinRequests { get; set; }
 
     }
 }
