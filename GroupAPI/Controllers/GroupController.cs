@@ -147,6 +147,136 @@ namespace GroupAPI.Controllers
             return Ok(model.Accept ? "Join request accepted" : "Join request rejected");
         }
 
+
+        [HttpPost("Leave")]
+        public async Task<IActionResult> LeaveGroup([FromBody] LeaveGroupModel model)
+        {
+            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (userId == null)
+            {
+                return Unauthorized("User is not authenticated");
+            }
+
+            using var transaction = await _context.Database.BeginTransactionAsync();
+
+            try
+            {
+                var group = await _context.Groups
+                    .Include(g => g.Members)  // Use the proper navigation property
+                    .FirstOrDefaultAsync(g => g.Id == model.GroupId);
+
+                if (group == null)
+                {
+                    return NotFound("Group not found");
+                }
+
+                var groupMember = group.Members.FirstOrDefault(gm => gm.UserId == userId);
+                if (groupMember == null)
+                {
+                    return BadRequest("You are not a member of this group");
+                }
+
+                if (group.CreatorId == userId)
+                {
+                    return BadRequest("As the group creator, you cannot leave the group. You must delete it.");
+                }
+
+                // Check for outstanding debts (same as before)
+                var amountOwed = await _context.ExpenseSplits
+                    .Where(es => es.UserId == userId && es.Expense.GroupId == group.Id && es.IsPaid == SplitStatus.Unpaid)
+                    .SumAsync(es => es.Amount);
+
+                var amountToReceive = await _context.GroupExpenses
+                    .Where(ge => ge.PaidById == userId && ge.GroupId == group.Id && ge.Status != ExpenseStatus.Settled)
+                    .SumAsync(ge => ge.Amount);
+
+                if (amountOwed > 0 || amountToReceive > 0)
+                {
+                    string errorMessage = "Cannot leave the group. ";
+                    if (amountOwed > 0) errorMessage += $"You owe {amountOwed:C}. ";
+                    if (amountToReceive > 0) errorMessage += $"You are owed {amountToReceive:C}. ";
+                    errorMessage += "Please settle all debts before leaving.";
+                    return BadRequest(errorMessage);
+                }
+
+                _context.GroupMembers.Remove(groupMember);
+                await _context.SaveChangesAsync();
+
+                await transaction.CommitAsync();
+
+                return Ok("You have successfully left the group.");
+            }
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync();
+                return StatusCode(500, $"An error occurred while leaving the group: {ex.Message}");
+            }
+        }
+
+
+        // DELETE: api/Group/Delete
+        public async Task<IActionResult> DeleteGroup(string groupId, string userId)
+        {
+            // Load the group with all its related entities
+            var group = await _context.Groups
+                .Include(g => g.Expenses)
+                    .ThenInclude(e => e.Splits)
+                        .ThenInclude(s => s.Payments) // Include payments related to splits
+                .Include(g => g.Members) // Include group members
+                .Include(g => g.JoinRequests) // Include join requests
+                .FirstOrDefaultAsync(g => g.Id == groupId);
+
+            if (group == null)
+            {
+                return NotFound();
+            }
+
+            // Check if the user has pending payments (either owes money or is owed money)
+            var pendingSplits = group.Expenses
+                .SelectMany(e => e.Splits)
+                .Where(s => (s.UserId == userId || s.Expense.PaidById == userId) && s.IsPaid != SplitStatus.Paid)
+                .ToList();
+
+            if (pendingSplits.Any())
+            {
+                return BadRequest("Cannot delete the group or leave as there are pending payments.");
+            }
+
+            // If no pending payments, proceed with deletion
+
+            // Remove related payments
+            foreach (var expense in group.Expenses)
+            {
+                foreach (var split in expense.Splits)
+                {
+                    _context.Payments.RemoveRange(split.Payments);
+                }
+
+                // Remove splits for each expense
+                _context.ExpenseSplits.RemoveRange(expense.Splits);
+            }
+
+            // Remove group expenses
+            _context.GroupExpenses.RemoveRange(group.Expenses);
+
+            // Remove group members
+            _context.GroupMembers.RemoveRange(group.Members);
+
+            // Remove join requests
+            _context.JoinRequests.RemoveRange(group.JoinRequests);
+
+            // Finally, remove the group
+            _context.Groups.Remove(group);
+
+            // Save changes to the database
+            await _context.SaveChangesAsync();
+
+            return Ok();
+        }
+
+
+
+
         private string GenerateUniqueCode()
         {
             const string chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -204,6 +334,17 @@ namespace GroupAPI.Controllers
             public string JoinRequestId { get; set; }
             [Required]
             public bool Accept { get; set; }
+        }
+        public class LeaveGroupModel
+        {
+            [Required]
+            public string GroupId { get; set; }
+        }
+
+        public class DeleteGroupModel
+        {
+            [Required]
+            public string GroupId { get; set; }
         }
     }
 }
