@@ -68,7 +68,7 @@ namespace GroupAPI
 
             app.UseAuthorization();
 
-
+            app.UseCors("DevelopmentPolicy");
             app.MapControllers();
 
             app.Run();

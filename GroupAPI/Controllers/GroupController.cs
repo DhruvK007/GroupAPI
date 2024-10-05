@@ -214,65 +214,78 @@ namespace GroupAPI.Controllers
         }
 
 
-        // DELETE: api/Group/Delete
-        public async Task<IActionResult> DeleteGroup(string groupId, string userId)
+        // DELETE: api/Group/{id}
+        [HttpDelete("{id}")]
+        public async Task<IActionResult> DeleteGroup(string id)
         {
-            // Load the group with all its related entities
-            var group = await _context.Groups
-                .Include(g => g.Expenses)
-                    .ThenInclude(e => e.Splits)
-                        .ThenInclude(s => s.Payments) // Include payments related to splits
-                .Include(g => g.Members) // Include group members
-                .Include(g => g.JoinRequests) // Include join requests
-                .FirstOrDefaultAsync(g => g.Id == groupId);
-
-            if (group == null)
+            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (userId == null)
             {
-                return NotFound();
+                return Unauthorized();
             }
 
-            // Check if the user has pending payments (either owes money or is owed money)
-            var pendingSplits = group.Expenses
-                .SelectMany(e => e.Splits)
-                .Where(s => (s.UserId == userId || s.Expense.PaidById == userId) && s.IsPaid != SplitStatus.Paid)
-                .ToList();
+            using var transaction = await _context.Database.BeginTransactionAsync();
 
-            if (pendingSplits.Any())
+            try
             {
-                return BadRequest("Cannot delete the group or leave as there are pending payments.");
-            }
+                // Load the group with all its related entities
+                var group = await _context.Groups
+                    .Include(g => g.Expenses)
+                        .ThenInclude(e => e.Splits)
+                            .ThenInclude(s => s.Payments)
+                    .Include(g => g.Members)
+                    .Include(g => g.JoinRequests)
+                    .FirstOrDefaultAsync(g => g.Id == id);
 
-            // If no pending payments, proceed with deletion
-
-            // Remove related payments
-            foreach (var expense in group.Expenses)
-            {
-                foreach (var split in expense.Splits)
+                if (group == null)
                 {
-                    _context.Payments.RemoveRange(split.Payments);
+                    return NotFound("Group not found");
                 }
 
-                // Remove splits for each expense
-                _context.ExpenseSplits.RemoveRange(expense.Splits);
+                // Verify that the user is the creator of the group
+                if (group.CreatorId != userId)
+                {
+                    return Forbid("Only the group creator can delete the group");
+                }
+
+                // Check for any pending payments in the group
+                var pendingPayments = group.Expenses
+                    .SelectMany(e => e.Splits)
+                    .Any(s => s.IsPaid != SplitStatus.Paid);
+
+                if (pendingPayments)
+                {
+                    return BadRequest("Cannot delete the group as there are pending payments. All payments must be settled first.");
+                }
+
+                // Delete related entities in the correct order to maintain referential integrity
+                var payments = group.Expenses
+                    .SelectMany(e => e.Splits)
+                    .SelectMany(s => s.Payments);
+                _context.Payments.RemoveRange(payments);
+
+                var splits = group.Expenses
+                    .SelectMany(e => e.Splits);
+                _context.ExpenseSplits.RemoveRange(splits);
+
+                _context.GroupExpenses.RemoveRange(group.Expenses);
+                _context.GroupMembers.RemoveRange(group.Members);
+                _context.JoinRequests.RemoveRange(group.JoinRequests);
+                _context.Groups.Remove(group);
+
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+
+                return Ok(new { message = "Group successfully deleted" });
             }
-
-            // Remove group expenses
-            _context.GroupExpenses.RemoveRange(group.Expenses);
-
-            // Remove group members
-            _context.GroupMembers.RemoveRange(group.Members);
-
-            // Remove join requests
-            _context.JoinRequests.RemoveRange(group.JoinRequests);
-
-            // Finally, remove the group
-            _context.Groups.Remove(group);
-
-            // Save changes to the database
-            await _context.SaveChangesAsync();
-
-            return Ok();
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync();
+                return StatusCode(500, new { message = "An error occurred while deleting the group", error = ex.Message });
+            }
         }
+
+
 
 
 
