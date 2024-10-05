@@ -285,9 +285,9 @@ namespace GroupAPI.Controllers
             }
         }
 
-        // GET: api/Group/CreatedByUser
-        [HttpGet("CreatedByUser")]
-        public async Task<ActionResult<IEnumerable<GroupResponseModel>>> GetGroupsCreatedByUser()
+        // GET: api/Group/Dashboard
+        [HttpGet("Dashboard")]
+        public async Task<ActionResult<DashboardResponse>> GetDashboard()
         {
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
             if (userId == null)
@@ -295,54 +295,57 @@ namespace GroupAPI.Controllers
                 return Unauthorized("User is not authenticated");
             }
 
-            var groups = await _context.Groups
+            var createdGroups = await _context.Groups
                 .Where(g => g.CreatorId == userId)
-                .Select(g => new GroupResponseModel(g))
-                .ToListAsync();
-
-            return Ok(groups);
-        }
-
-        // GET: api/Group/MemberOf
-        [HttpGet("MemberOf")]
-        public async Task<ActionResult<IEnumerable<GroupResponseModel>>> GetGroupsMemberOf()
-        {
-            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-            if (userId == null)
-            {
-                return Unauthorized("User is not authenticated");
-            }
-
-            var groups = await _context.GroupMembers
-                .Where(gm => gm.UserId == userId)
-                .Select(gm => new GroupResponseModel(gm.Group))
-                .ToListAsync();
-
-            return Ok(groups);
-        }
-
-        // GET: api/Group/PendingJoinRequests
-        [HttpGet("PendingJoinRequests")]
-        public async Task<ActionResult<IEnumerable<PendingJoinRequestModel>>> GetPendingJoinRequests()
-        {
-            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-            if (userId == null)
-            {
-                return Unauthorized("User is not authenticated");
-            }
-
-            var pendingRequests = await _context.JoinRequests
-                .Where(jr => jr.UserId == userId && jr.Status == JoinRequestStatus.Pending)
-                .Select(jr => new PendingJoinRequestModel
+                .Select(g => new CreatedGroupDTO
                 {
-                    JoinRequestId = jr.Id,
-                    GroupId = jr.GroupId,
-                    GroupName = jr.Group.Name,
-                    CreatedAt = jr.CreatedAt
+                    Id = g.Id,
+                    Name = g.Name,
+                    Description = g.Description,
+                    Code = g.Code,
+                    MembersCount = g.Members.Count,
+                    PendingRequestsCount = g.JoinRequests.Count(jr => jr.Status == JoinRequestStatus.Pending)
                 })
                 .ToListAsync();
 
-            return Ok(pendingRequests);
+            var memberGroups = await _context.GroupMembers
+                .Where(gm => gm.UserId == userId)
+                .Select(gm => new GroupDTO
+                {
+                    Id = gm.Group.Id,
+                    Name = gm.Group.Name,
+                    Description = gm.Group.Description,
+                    Code = gm.Group.Code,
+                    CreatorId = gm.Group.CreatorId
+                })
+                .ToListAsync();
+
+            var pendingRequests = await _context.JoinRequests
+                .Where(jr => jr.UserId == userId && jr.Status == JoinRequestStatus.Pending)
+                .Select(jr => new PendingRequestDTO
+                {
+                    Id = jr.Id,
+                    GroupId = jr.GroupId,
+                    UserId = jr.UserId,
+                    Status = jr.Status,
+                    CreatedAt = jr.CreatedAt,
+                    Group = new GroupDTO
+                    {
+                        Id = jr.Group.Id,
+                        Name = jr.Group.Name,
+                        Description = jr.Group.Description,
+                        Code = jr.Group.Code,
+                        CreatorId = jr.Group.CreatorId
+                    }
+                })
+                .ToListAsync();
+
+            return Ok(new DashboardResponse
+            {
+                CreatedGroups = createdGroups,
+                MemberGroups = memberGroups,
+                PendingRequests = pendingRequests
+            });
         }
 
 
@@ -425,6 +428,42 @@ namespace GroupAPI.Controllers
             public string GroupId { get; set; }
             public string GroupName { get; set; }
             public DateTime CreatedAt { get; set; }
+        }
+
+        public class DashboardResponse
+        {
+            public List<CreatedGroupDTO> CreatedGroups { get; set; }
+            public List<GroupDTO> MemberGroups { get; set; }
+            public List<PendingRequestDTO> PendingRequests { get; set; }
+        }
+
+        public class CreatedGroupDTO
+        {
+            public string Id { get; set; }
+            public string Name { get; set; }
+            public string Description { get; set; }
+            public string Code { get; set; }
+            public int MembersCount { get; set; }
+            public int PendingRequestsCount { get; set; }
+        }
+
+        public class GroupDTO
+        {
+            public string Id { get; set; }
+            public string Name { get; set; }
+            public string Description { get; set; }
+            public string Code { get; set; }
+            public string CreatorId { get; set; }
+        }
+
+        public class PendingRequestDTO
+        {
+            public string Id { get; set; }
+            public string GroupId { get; set; }
+            public string UserId { get; set; }
+            public JoinRequestStatus Status { get; set; }
+            public DateTime CreatedAt { get; set; }
+            public GroupDTO Group { get; set; }
         }
     }
 }
