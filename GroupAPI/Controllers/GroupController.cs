@@ -285,6 +285,65 @@ namespace GroupAPI.Controllers
             }
         }
 
+        // GET: api/Group/CreatedByUser
+        [HttpGet("CreatedByUser")]
+        public async Task<ActionResult<IEnumerable<GroupResponseModel>>> GetGroupsCreatedByUser()
+        {
+            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (userId == null)
+            {
+                return Unauthorized("User is not authenticated");
+            }
+
+            var groups = await _context.Groups
+                .Where(g => g.CreatorId == userId)
+                .Select(g => new GroupResponseModel(g))
+                .ToListAsync();
+
+            return Ok(groups);
+        }
+
+        // GET: api/Group/MemberOf
+        [HttpGet("MemberOf")]
+        public async Task<ActionResult<IEnumerable<GroupResponseModel>>> GetGroupsMemberOf()
+        {
+            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (userId == null)
+            {
+                return Unauthorized("User is not authenticated");
+            }
+
+            var groups = await _context.GroupMembers
+                .Where(gm => gm.UserId == userId)
+                .Select(gm => new GroupResponseModel(gm.Group))
+                .ToListAsync();
+
+            return Ok(groups);
+        }
+
+        // GET: api/Group/PendingJoinRequests
+        [HttpGet("PendingJoinRequests")]
+        public async Task<ActionResult<IEnumerable<PendingJoinRequestModel>>> GetPendingJoinRequests()
+        {
+            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (userId == null)
+            {
+                return Unauthorized("User is not authenticated");
+            }
+
+            var pendingRequests = await _context.JoinRequests
+                .Where(jr => jr.UserId == userId && jr.Status == JoinRequestStatus.Pending)
+                .Select(jr => new PendingJoinRequestModel
+                {
+                    JoinRequestId = jr.Id,
+                    GroupId = jr.GroupId,
+                    GroupName = jr.Group.Name,
+                    CreatedAt = jr.CreatedAt
+                })
+                .ToListAsync();
+
+            return Ok(pendingRequests);
+        }
 
 
 
@@ -358,6 +417,14 @@ namespace GroupAPI.Controllers
         {
             [Required]
             public string GroupId { get; set; }
+        }
+
+        public class PendingJoinRequestModel
+        {
+            public string JoinRequestId { get; set; }
+            public string GroupId { get; set; }
+            public string GroupName { get; set; }
+            public DateTime CreatedAt { get; set; }
         }
     }
 }
