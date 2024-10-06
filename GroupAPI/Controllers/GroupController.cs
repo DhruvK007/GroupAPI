@@ -8,6 +8,7 @@ using GroupAPI.Data;
 using GroupAPI.Models;
 using System.Security.Claims;
 using System.ComponentModel.DataAnnotations;
+using static Microsoft.EntityFrameworkCore.DbLoggerCategory;
 
 namespace GroupAPI.Controllers
 {
@@ -17,10 +18,11 @@ namespace GroupAPI.Controllers
     public class GroupController : ControllerBase
     {
         private readonly ApplicationDbContext _context;
-
-        public GroupController(ApplicationDbContext context)
+        private readonly ILogger<GroupController> _logger;
+        public GroupController(ApplicationDbContext context, ILogger<GroupController> logger)
         {
             _context = context;
+            _logger = logger;
         }
 
         // POST: api/Group/Create
@@ -73,9 +75,10 @@ namespace GroupAPI.Controllers
             return new GroupResponseModel(group);
         }
 
+
         // POST: api/Group/JoinRequest
         [HttpPost("JoinRequest")]
-        public async Task<IActionResult> CreateJoinRequest(JoinRequestModel model)
+        public async Task<ActionResult<JoinRequestResponseDTO>> CreateJoinRequest(JoinRequestModel model)
         {
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
             var group = await _context.Groups.FirstOrDefaultAsync(g => g.Code == model.GroupCode);
@@ -111,7 +114,25 @@ namespace GroupAPI.Controllers
             _context.JoinRequests.Add(joinRequest);
             await _context.SaveChangesAsync();
 
-            return Ok("Join request sent successfully");
+            // Create response DTO matching frontend expectations
+            var response = new JoinRequestResponseDTO
+            {
+                Id = joinRequest.Id,
+                GroupId = joinRequest.GroupId,
+                UserId = joinRequest.UserId,
+                Status = joinRequest.Status,
+                CreatedAt = joinRequest.CreatedAt,
+                Group = new GroupDTO
+                {
+                    Id = group.Id,
+                    Name = group.Name,
+                    Description = group.Description,
+                    Code = group.Code,
+                    CreatorId = group.CreatorId
+                }
+            };
+
+            return Ok(response);
         }
 
         // POST: api/Group/RespondToJoinRequest
@@ -348,6 +369,34 @@ namespace GroupAPI.Controllers
             });
         }
 
+        [HttpPost("CancelJoinRequest")]
+        public async Task<IActionResult> CancelJoinRequest([FromBody] CancelJoinRequestModel model)
+        {
+            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (userId == null)
+            {
+                return Unauthorized("User is not authenticated");
+            }
+
+            var joinRequest = await _context.JoinRequests
+                .FirstOrDefaultAsync(jr => jr.Id == model.JoinRequestId && jr.UserId == userId);
+
+            if (joinRequest == null)
+            {
+                return NotFound("Join request not found or you are not authorized to cancel it");
+            }
+
+            if (joinRequest.Status != JoinRequestStatus.Pending)
+            {
+                return BadRequest("Only pending join requests can be cancelled");
+            }
+
+            _context.JoinRequests.Remove(joinRequest);
+            await _context.SaveChangesAsync();
+
+            return Ok("Join request cancelled successfully");
+        }
+
 
 
 
@@ -373,8 +422,9 @@ namespace GroupAPI.Controllers
         {
             [Required]
             public string Name { get; set; }
-            public string Description { get; set; }
-            public string Photo { get; set; }
+
+            public string Description { get; set; } = "";
+            public string Photo { get; set; } = "";
         }
 
         public class GroupResponseModel
@@ -457,6 +507,22 @@ namespace GroupAPI.Controllers
         }
 
         public class PendingRequestDTO
+        {
+            public string Id { get; set; }
+            public string GroupId { get; set; }
+            public string UserId { get; set; }
+            public JoinRequestStatus Status { get; set; }
+            public DateTime CreatedAt { get; set; }
+            public GroupDTO Group { get; set; }
+        }
+
+        public class CancelJoinRequestModel
+        {
+            [Required]
+            public string JoinRequestId { get; set; }
+        }
+
+        public class JoinRequestResponseDTO
         {
             public string Id { get; set; }
             public string GroupId { get; set; }
