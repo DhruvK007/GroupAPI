@@ -9,6 +9,7 @@ using GroupAPI.Models;
 using System.Security.Claims;
 using System.ComponentModel.DataAnnotations;
 using static Microsoft.EntityFrameworkCore.DbLoggerCategory;
+using static GroupAPI.Controllers.GroupController.JoinRequestResponseDTO;
 
 namespace GroupAPI.Controllers
 {
@@ -397,7 +398,85 @@ namespace GroupAPI.Controllers
             return Ok("Join request cancelled successfully");
         }
 
+        [HttpGet("CreatorCheck")]
+        public async Task<IActionResult> CreatorCheck(string id)
+        {
+            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
+            if (userId == null)
+            {
+                return Unauthorized("User is not authenticated");
+            }
+
+            var group = await _context.Groups.FindAsync(id);
+
+            if (group == null)
+            {
+                return NotFound("Group not found");
+            }
+
+            if (group.CreatorId != userId)
+            {
+                return Forbid("User is not authorized to access this group");
+            }
+
+            return Ok();
+        }
+
+        [HttpGet("{id}/JoinRequests")]
+        public async Task<ActionResult<List<JoinRequestResponse2DTO>>> GetJoinRequests(string id)
+        {
+            {
+                var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+                if (userId == null)
+                {
+                    return Unauthorized("User is not authenticated");
+                }
+
+                var group = await _context.Groups
+                    .Include(g => g.JoinRequests)
+                        .ThenInclude(jr => jr.User)
+                    .FirstOrDefaultAsync(g => g.Id == id);
+
+                if (group == null)
+                {
+                    return NotFound("Group not found");
+                }
+
+                if (group.CreatorId != userId)
+                {
+                    return Forbid("User is not authorized to access this group's join requests");
+                }
+
+                var joinRequests = group.JoinRequests
+                    .Where(jr => jr.Status == JoinRequestStatus.Pending)
+                    .Select(jr => new JoinRequestResponse2DTO
+                    {
+                        Id = jr.Id,
+                        GroupId = jr.GroupId,
+                        UserId = jr.UserId,
+                        Status = jr.Status,
+                        CreatedAt = jr.CreatedAt,
+                        User = new UserDTO
+                        {
+                            Id = jr.User.Id,
+                            Name = jr.User.Name,
+                            Email = jr.User.Email
+                        },
+                        Group = new GroupDTO
+                        {
+                            Id = group.Id,
+                            Name = group.Name,
+                            Description = group.Description,
+                            Code = group.Code,
+                            CreatorId = group.CreatorId
+                        }
+                    })
+                    .ToList();
+
+                return Ok(joinRequests);
+            }
+        }
 
 
 
@@ -530,6 +609,24 @@ namespace GroupAPI.Controllers
             public JoinRequestStatus Status { get; set; }
             public DateTime CreatedAt { get; set; }
             public GroupDTO Group { get; set; }
+
+
+            public class JoinRequestResponse2DTO
+            {
+                public string Id { get; set; }
+                public string GroupId { get; set; }
+                public string UserId { get; set; }
+                public JoinRequestStatus Status { get; set; }
+                public DateTime CreatedAt { get; set; }
+                public UserDTO User { get; set; }
+                public GroupDTO Group { get; set; }
+            }
+            public class UserDTO
+            {
+                public string Id { get; set; }
+                public string Name { get; set; }
+                public string Email { get; set; }
+            }
         }
     }
 }
