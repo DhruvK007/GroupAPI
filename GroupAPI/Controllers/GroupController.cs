@@ -477,10 +477,205 @@ namespace GroupAPI.Controllers
                 return Ok(joinRequests);
             }
         }
+        [HttpGet("{groupId}/PageData")]
+        public async Task<ActionResult<GroupPageData>> GetGroupPageData(string groupId)
+        {
+            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (userId == null)
+            {
+                return Unauthorized();
+            }
+
+            var group = await _context.Groups
+                .Include(g => g.Members)
+                .FirstOrDefaultAsync(g => g.Id == groupId && g.Members.Any(m => m.UserId == userId));
+
+            if (group == null)
+            {
+                return NotFound("Group not found or user is not a member");
+            }
+
+            var transactionData = await GetGroupTransactionData(groupId);
+            var balanceData = await FetchGroupBalances(groupId);
+            var usersToPayData = await GetUsersYouNeedToPay(groupId, userId);
+
+            var currentUserBalance = balanceData.FirstOrDefault(b => b.UserId == userId);
+            var leaveStatus = new LeaveStatus
+            {
+                Status = currentUserBalance?.Amount > 0 ? "gets back" : "owes",
+                Amount = Math.Abs(currentUserBalance?.Amount ?? 0),
+                UserId = userId,
+                GroupId = groupId
+            };
+
+            var groupMembers = await _context.GroupMembers
+                .Where(gm => gm.GroupId == groupId)
+                .Select(gm => new GroupMemberData
+                {
+                    UserId = gm.UserId,
+                    Name = gm.User.Name
+                })
+                .ToListAsync();
+
+            return new GroupPageData
+            {
+                GroupName = group.Name,
+                CreatorId = group.CreatorId,
+                UserName = User.FindFirst(ClaimTypes.Name)?.Value?.Split(' ')[0],
+                UserId = userId,
+                Leave = leaveStatus,
+                GroupMembers = groupMembers,
+                UsersYouNeedToPay = usersToPayData,
+                TransactionData = transactionData,
+                Balance = balanceData
+            };
+        }
+
+        private async Task<List<TransactionData>> GetGroupTransactionData(string groupId)
+        {
+            return await _context.GroupExpenses
+                .Where(ge => ge.GroupId == groupId)
+                .Select(ge => new TransactionData
+                {
+                    Id = ge.Id,
+                    Description = ge.Description,
+                    Amount = ge.Amount,
+                    Date = ge.Date,
+                    PaidBy = ge.PaidBy.Name,
+                    Category = ge.Category.ToString()
+                })
+                .ToListAsync();
+        }
+
+        private async Task<List<BalanceData>> FetchGroupBalances(string groupId)
+        {
+            var expenses = await _context.GroupExpenses
+                .Where(ge => ge.GroupId == groupId)
+                .Include(ge => ge.Splits)
+                .ToListAsync();
+
+            var balances = new Dictionary<string, decimal>();
+
+            foreach (var expense in expenses)
+            {
+                if (!balances.ContainsKey(expense.PaidById))
+                {
+                    balances[expense.PaidById] = 0;
+                }
+                balances[expense.PaidById] += expense.Amount;
+
+                foreach (var split in expense.Splits)
+                {
+                    if (!balances.ContainsKey(split.UserId))
+                    {
+                        balances[split.UserId] = 0;
+                    }
+                    balances[split.UserId] -= split.Amount;
+                }
+            }
+
+            var users = await _context.Users
+                .Where(u => balances.Keys.Contains(u.Id))
+                .ToDictionaryAsync(u => u.Id, u => u);
+
+            return balances.Select(kvp => new BalanceData
+            {
+                UserId = kvp.Key,
+                Name = users[kvp.Key].Name,
+                Amount = kvp.Value,
+                Status = kvp.Value > 0 ? "gets back" : "owes"
+            }).ToList();
+        }
+
+        private async Task<List<UserToPayData>> GetUsersYouNeedToPay(string groupId, string userId)
+        {
+            var expenses = await _context.GroupExpenses
+                .Where(ge => ge.GroupId == groupId)
+                .Include(ge => ge.Splits)
+                .ToListAsync();
+
+            var debts = new Dictionary<string, decimal>();
+
+            foreach (var expense in expenses)
+            {
+                var userSplit = expense.Splits.FirstOrDefault(s => s.UserId == userId);
+                if (userSplit != null && userSplit.Amount > 0 && expense.PaidById != userId)
+                {
+                    if (!debts.ContainsKey(expense.PaidById))
+                    {
+                        debts[expense.PaidById] = 0;
+                    }
+                    debts[expense.PaidById] += userSplit.Amount;
+                }
+            }
+
+            var users = await _context.Users
+                .Where(u => debts.Keys.Contains(u.Id))
+                .ToDictionaryAsync(u => u.Id, u => u);
+
+            return debts.Select(kvp => new UserToPayData
+            {
+                UserId = kvp.Key,
+                Name = users[kvp.Key].Name,
+                Amount = kvp.Value
+            }).ToList();
+        }
+    
+
+    public class GroupPageData
+    {
+        public string GroupName { get; set; }
+        public string CreatorId { get; set; }
+        public string UserName { get; set; }
+        public string UserId { get; set; }
+        public LeaveStatus Leave { get; set; }
+        public List<GroupMemberData> GroupMembers { get; set; }
+        public List<UserToPayData> UsersYouNeedToPay { get; set; }
+        public List<TransactionData> TransactionData { get; set; }
+        public List<BalanceData> Balance { get; set; }
+    }
+
+    public class LeaveStatus
+    {
+        public string Status { get; set; }
+        public decimal Amount { get; set; }
+        public string UserId { get; set; }
+        public string GroupId { get; set; }
+    }
+
+    public class GroupMemberData
+    {
+        public string UserId { get; set; }
+        public string Name { get; set; }
+    }
+
+    public class UserToPayData
+    {
+        public string UserId { get; set; }
+        public string Name { get; set; }
+        public decimal Amount { get; set; }
+    }
+
+    public class TransactionData
+    {
+        public string Id { get; set; }
+        public string Description { get; set; }
+        public decimal Amount { get; set; }
+        public DateTime Date { get; set; }
+        public string PaidBy { get; set; }
+        public string Category { get; set; }
+    }
+
+    public class BalanceData
+    {
+        public string UserId { get; set; }
+        public string Name { get; set; }
+        public decimal Amount { get; set; }
+        public string Status { get; set; }
+    }
 
 
-
-        private string GenerateUniqueCode()
+    private string GenerateUniqueCode()
         {
             const string chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
             var random = new Random();
@@ -496,6 +691,8 @@ namespace GroupAPI.Controllers
 
             return code;
         }
+
+
 
         public class CreateGroupModel
         {
