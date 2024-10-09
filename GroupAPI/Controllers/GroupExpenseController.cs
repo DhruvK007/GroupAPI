@@ -6,11 +6,14 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using GroupAPI.Data;
 using GroupAPI.Models;
+using Microsoft.AspNetCore.Authorization;
+using System.Security.Claims;
 
 namespace GroupAPI.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
+    [Authorize]
     public class GroupExpenseController : ControllerBase
     {
         private readonly ApplicationDbContext _context;
@@ -19,6 +22,7 @@ namespace GroupAPI.Controllers
         {
             _context = context;
         }
+
 
         [HttpPost("AddExpense")]
         public async Task<IActionResult> AddExpense([FromBody] AddExpenseRequest request)
@@ -94,7 +98,9 @@ namespace GroupAPI.Controllers
         {
             if (!ModelState.IsValid)
             {
-                return BadRequest(ModelState);
+                var errors = ModelState.SelectMany(x => x.Value.Errors)
+                                       .Select(x => x.ErrorMessage);
+                return BadRequest(new { Message = "Invalid data", Errors = errors });
             }
 
             using var transaction = await _context.Database.BeginTransactionAsync();
@@ -102,12 +108,19 @@ namespace GroupAPI.Controllers
             try
             {
                 // Verify that both users are members of the group
-                var groupMembers = await _context.GroupMembers
-                    .Where(gm => gm.GroupId == request.GroupID)
-                    .Select(gm => gm.UserId)
-                    .ToListAsync();
+                var group = await _context.Groups
+                    .Include(g => g.Members)
+                    .FirstOrDefaultAsync(g => g.Id == request.GroupID);
 
-                if (!groupMembers.Contains(request.PayerId) || !groupMembers.Contains(request.RecipientId))
+                if (group == null)
+                {
+                    return NotFound("Group not found.");
+                }
+
+                var payerMember = group.Members.FirstOrDefault(m => m.UserId == request.PayerId);
+                var recipientMember = group.Members.FirstOrDefault(m => m.UserId == request.RecipientId);
+
+                if (payerMember == null || recipientMember == null)
                 {
                     return BadRequest("Both users must be members of the group.");
                 }
@@ -120,8 +133,6 @@ namespace GroupAPI.Controllers
                     .Where(ge => ge.Status != ExpenseStatus.Cancelled)
                     .Include(ge => ge.Splits)
                     .ToListAsync();
-
-                var updates = new List<Task>();
 
                 foreach (var expense in request.ExpenseIds)
                 {
@@ -138,52 +149,32 @@ namespace GroupAPI.Controllers
                     }
 
                     // Create payment
-                    var task = _context.Payments.AddAsync(new Payment
+                    var payment = new Payment
                     {
-                        ExpenseSplitId = expense.ExpenseId,
+                        ExpenseSplitId = payerSplit.Id,
                         Amount = expense.Amount,
                         PaidAt = request.TransactionDate
-                    }).AsTask();
-
-                    updates.Add(task);
+                    };
+                    await _context.Payments.AddAsync(payment);
 
                     // Update split status
                     payerSplit.IsPaid = SplitStatus.Paid;
                     _context.ExpenseSplits.Update(payerSplit);
 
                     // Update expense status
-                    var allSplitsPaid = groupExpense.Splits.All(s => s.IsPaid == SplitStatus.Paid);
-                    var someSplitsPaid = groupExpense.Splits.Any(s => s.IsPaid == SplitStatus.Paid);
-
-                    if (allSplitsPaid)
-                    {
-                        groupExpense.Status = ExpenseStatus.Settled;
-                    }
-                    else if (someSplitsPaid)
-                    {
-                        groupExpense.Status = ExpenseStatus.PartiallySettled;
-                    }
-                    else
-                    {
-                        groupExpense.Status = ExpenseStatus.Unsettled;
-                    }
-
+                    UpdateExpenseStatus(groupExpense);
                     _context.GroupExpenses.Update(groupExpense);
                 }
 
-                await Task.WhenAll(updates);
                 await _context.SaveChangesAsync();
 
                 // Calculate total amount settled
                 decimal totalAmount = request.ExpenseIds.Sum(e => e.Amount);
 
                 // TODO: Implement sendSettleUpNotification method
-                // sendSettleUpNotification(request.GroupID, request.PayerId, request.RecipientId, totalAmount);
+                // await SendSettleUpNotificationAsync(request.GroupID, request.PayerId, request.RecipientId, totalAmount);
 
                 await transaction.CommitAsync();
-
-                // TODO: Implement revalidatePath method or remove if not applicable in your backend
-                // revalidatePath($"/group/{request.GroupID}");
 
                 return Ok(new { Message = "Payment to group member completed successfully!" });
             }
@@ -193,38 +184,57 @@ namespace GroupAPI.Controllers
                 return StatusCode(500, $"An error occurred while settling up: {ex.Message}");
             }
         }
-    }
 
-    public class AddExpenseRequest
-    {
-        public string GroupId { get; set; }
-        public string PaidById { get; set; }
-        public CategoryTypes Category { get; set; }
-        public decimal Amount { get; set; }
-        public string Title { get; set; }
-        public DateTime Date { get; set; }
-        public List<ExpenseSplitRequest> Splits { get; set; }
-    }
+        private void UpdateExpenseStatus(GroupExpense expense)
+        {
+            var allSplitsPaid = expense.Splits.All(s => s.IsPaid == SplitStatus.Paid);
+            var someSplitsPaid = expense.Splits.Any(s => s.IsPaid == SplitStatus.Paid);
 
-    public class ExpenseSplitRequest
-    {
-        public string UserId { get; set; }
-        public decimal Amount { get; set; }
-    }
+            if (allSplitsPaid)
+            {
+                expense.Status = ExpenseStatus.Settled;
+            }
+            else if (someSplitsPaid)
+            {
+                expense.Status = ExpenseStatus.PartiallySettled;
+            }
+            else
+            {
+                expense.Status = ExpenseStatus.Unsettled;
+            }
+        }
 
-    public class SettleUpRequest
-    {
-        public string GroupID { get; set; }
-        public string PayerId { get; set; }
-        public string RecipientId { get; set; }
-        public List<ExpenseDetail> ExpenseIds { get; set; }
-        public DateTime TransactionDate { get; set; }
-    }
+        public class AddExpenseRequest
+        {
+            public string GroupId { get; set; }
+            public string PaidById { get; set; }
+            public CategoryTypes Category { get; set; }
+            public decimal Amount { get; set; }
+            public string Title { get; set; }
+            public DateTime Date { get; set; }
+            public List<ExpenseSplitRequest> Splits { get; set; }
+        }
 
-    public class ExpenseDetail
-    {
-        public string ExpenseId { get; set; }
-        public decimal Amount { get; set; }
-        public string GroupExpenseId { get; set; }
+        public class ExpenseSplitRequest
+        {
+            public string UserId { get; set; }
+            public decimal Amount { get; set; }
+        }
+
+        public class SettleUpRequest
+        {
+            public string GroupID { get; set; }
+            public string PayerId { get; set; }
+            public string RecipientId { get; set; }
+            public List<ExpenseDetail> ExpenseIds { get; set; }
+            public DateTime TransactionDate { get; set; }
+        }
+
+        public class ExpenseDetail
+        {
+            public string ExpenseId { get; set; }
+            public decimal Amount { get; set; }
+            public string GroupExpenseId { get; set; }
+        }
     }
 }

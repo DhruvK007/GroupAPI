@@ -20,6 +20,8 @@ namespace GroupAPI.Controllers
     {
         private readonly ApplicationDbContext _context;
         private readonly ILogger<GroupController> _logger;
+        private object users;
+
         public GroupController(ApplicationDbContext context, ILogger<GroupController> logger)
         {
             _context = context;
@@ -490,14 +492,17 @@ namespace GroupAPI.Controllers
                 .Include(g => g.Members)
                 .FirstOrDefaultAsync(g => g.Id == groupId && g.Members.Any(m => m.UserId == userId));
 
-            if (group == null)
+            if (group == null &&  groupId == null && userId == null)
             {
                 return NotFound("Group not found or user is not a member");
             }
 
             var transactionData = await GetGroupTransactionData(groupId);
             var balanceData = await FetchGroupBalances(groupId);
-            var usersToPayData = await GetUsersYouNeedToPay(groupId, userId);
+            var usersToPayData = await GetUsersToPay(userId, groupId);
+
+            Console.WriteLine("Users to pay: ");
+            Console.WriteLine(balanceData.ToArray());
 
             var currentUserBalance = balanceData.FirstOrDefault(b => b.UserId == userId);
             var leaveStatus = new LeaveStatus
@@ -525,24 +530,141 @@ namespace GroupAPI.Controllers
                 UserId = userId,
                 Leave = leaveStatus,
                 GroupMembers = groupMembers,
-                UsersYouNeedToPay = usersToPayData,
-                TransactionData = transactionData,
+                TransactionData = transactionData.Select(td => new DetailedTransactionData
+                {
+                    Id = td.Id,
+                    Description = td.Description,
+                    Amount = td.Amount,
+                    Date = td.Date,
+                    PaidBy = td.PaidBy,
+                    Category = td.Category,
+                    Splits = td.Splits,
+                    Status = td.Status
+                }).ToList(),
+                UsersYouNeedToPay = usersToPayData.Select(utp => new UserToPayData
+                {
+                    UserId = utp.UserId,
+                    Name = utp.Name,
+                    Amount = utp.Amount,
+                    Transactions = utp.Transactions.Select(td => new TransactionDebtData
+                    {
+                        ExpenseId = td.ExpenseId,
+                        Description = td.Description,
+                        Amount = td.Amount,
+                        Date = td.Date,
+                        Status = td.Status
+                    }).ToList(),
+                }).ToList(),
                 Balance = balanceData
             };
+
         }
 
-        private async Task<List<TransactionData>> GetGroupTransactionData(string groupId)
+
+        private async Task<List<UserToPayData>> GetUsersToPay(string userId, string groupId)
+        {
+            var expenseSplits = await _context.ExpenseSplits
+                .Where(es => es.UserId == userId &&
+                             es.Expense.GroupId == groupId &&
+                             ((int)es.IsPaid == 0 || (int)es.IsPaid == 1)) // 0 for Unpaid, 1 for PartiallyPaid
+                .Select(es => new
+                {
+                    es.Id,
+                    es.Amount,
+                    es.ExpenseId,
+                    PaidById = es.Expense.PaidBy.Id,
+                    PaidByName = es.Expense.PaidBy.Name,
+                    Payments = es.Payments.Select(p => new { p.Amount }).ToList(),
+                    IsPaid = (int)es.IsPaid
+                })
+                .ToListAsync();
+
+            return expenseSplits
+                .Select(es => new
+                {
+                    Id = es.Id,
+                    GroupExpenseId = es.Id,
+                    MemberName = es.PaidByName,
+                    MemberId = es.PaidById,
+                    AmountToPay = es.Amount - es.Payments.Sum(p => p.Amount),
+                    Status = (SplitStatus)es.IsPaid
+                })
+                .Where(payment => payment.AmountToPay > 0 && payment.MemberId != userId)
+                .GroupBy(payment => payment.MemberId)
+                .Select(group => new UserToPayData
+                {
+                    UserId = group.Key,
+                    Name = group.First().MemberName,
+                    Amount = group.Sum(p => p.AmountToPay),
+                    Transactions = group.Select(p => new TransactionDebtData
+                    {
+                        ExpenseId = p.GroupExpenseId,
+                        Description = $"Expense {p.GroupExpenseId}",
+                        Amount = p.AmountToPay,
+                        Date = DateTime.Now, // You might want to fetch the actual date from the database
+                        Status = p.Status
+                    }).ToList()
+                })
+                .ToList();
+
+           
+        }
+
+        public class UserToPayData
+        {
+            public string UserId { get; set; }
+            public string Name { get; set; }
+            public decimal Amount { get; set; }
+            public List<TransactionDebtData> Transactions { get; set; }
+        }
+
+        public class TransactionDebtData
+        {
+            public string ExpenseId { get; set; }
+            public string Description { get; set; }
+            public decimal Amount { get; set; }
+            public DateTime Date { get; set; }
+            public SplitStatus Status { get; set; }
+        }
+
+
+
+        public class UserPaymentInfo
+        {
+            public string ExpenseId { get; set; }
+            public decimal Amount { get; set; }
+            public SplitStatus Status { get; set; }
+            public string MemberId { get; set; }
+            public string PaidTo { get; set; }
+            public string GroupName { get; set; }
+        }
+
+
+        private Task<List<DetailedTransactionData>> GetGroupTransactionData(string groupId)
+        {
+            return GetGroupTransactionData(groupId, SplitStatus.Unpaid);
+        }
+
+        private async Task<List<DetailedTransactionData>> GetGroupTransactionData(string groupId, SplitStatus Status)
         {
             return await _context.GroupExpenses
                 .Where(ge => ge.GroupId == groupId)
-                .Select(ge => new TransactionData
+                .Select(ge => new DetailedTransactionData
                 {
                     Id = ge.Id,
                     Description = ge.Description,
                     Amount = ge.Amount,
                     Date = ge.Date,
                     PaidBy = ge.PaidBy.Name,
-                    Category = ge.Category.ToString()
+                    Category = ge.Category.ToString(),
+                    Status = ge.Status,
+                    Splits = ge.Splits.Select(s => new SplitData
+                    {
+                        UserId = s.UserId,
+                        UserName = s.User.Name,
+                        Amount = s.Amount,
+                        Status = s.IsPaid
+                    }).ToList()
                 })
                 .ToListAsync();
         }
@@ -587,55 +709,64 @@ namespace GroupAPI.Controllers
             }).ToList();
         }
 
-        private async Task<List<UserToPayData>> GetUsersYouNeedToPay(string groupId, string userId)
+
+        // Get detailed list of users you need to pay
+       
+
+
+        // Transaction data
+        public class DetailedTransactionData
         {
-            var expenses = await _context.GroupExpenses
-                .Where(ge => ge.GroupId == groupId)
-                .Include(ge => ge.Splits)
-                .ToListAsync();
-
-            var debts = new Dictionary<string, decimal>();
-
-            foreach (var expense in expenses)
-            {
-                var userSplit = expense.Splits.FirstOrDefault(s => s.UserId == userId);
-                if (userSplit != null && userSplit.Amount > 0 && expense.PaidById != userId)
-                {
-                    if (!debts.ContainsKey(expense.PaidById))
-                    {
-                        debts[expense.PaidById] = 0;
-                    }
-                    debts[expense.PaidById] += userSplit.Amount;
-                }
-            }
-
-            var users = await _context.Users
-                .Where(u => debts.Keys.Contains(u.Id))
-                .ToDictionaryAsync(u => u.Id, u => u);
-
-            return debts.Select(kvp => new UserToPayData
-            {
-                UserId = kvp.Key,
-                Name = users[kvp.Key].Name,
-                Amount = kvp.Value
-            }).ToList();
+            public string Id { get; set; }
+            public string Description { get; set; }
+            public decimal Amount { get; set; }
+            public DateTime Date { get; set; }
+            public string PaidBy { get; set; }
+            public string Category { get; set; }
+            public ExpenseStatus Status { get; set; }
+            public List<SplitData> Splits { get; set; }
         }
-    
 
-    public class GroupPageData
-    {
-        public string GroupName { get; set; }
-        public string CreatorId { get; set; }
-        public string UserName { get; set; }
-        public string UserId { get; set; }
-        public LeaveStatus Leave { get; set; }
-        public List<GroupMemberData> GroupMembers { get; set; }
-        public List<UserToPayData> UsersYouNeedToPay { get; set; }
-        public List<TransactionData> TransactionData { get; set; }
-        public List<BalanceData> Balance { get; set; }
-    }
+        // Split data
+        public class SplitData
+        {
+            public string UserId { get; set; }
+            public string UserName { get; set; }
+            public decimal Amount { get; set; }
+            public SplitStatus Status { get; set; }
+        }
 
-    public class LeaveStatus
+      
+
+
+        //// Transaction debt data
+        //public class TransactionDebtData
+        //{
+        //    public string ExpenseId { get; set; } // Add this field
+        //    public string Description { get; set; }
+        //    public decimal Amount { get; set; }
+        //    public DateTime Date { get; set; }
+        //    public SplitStatus Status { get; set; } // The status of each transaction
+        //}
+
+
+        // Group page data
+        public class GroupPageData
+        {
+            public string GroupName { get; set; }
+            public string CreatorId { get; set; }
+            public string UserName { get; set; }
+            public string UserId { get; set; }
+            public LeaveStatus Leave { get; set; }
+            public List<GroupMemberData> GroupMembers { get; set; }
+            public List<UserToPayData> UsersYouNeedToPay { get; set; }
+            public List<DetailedTransactionData> TransactionData { get; set; }
+            public List<BalanceData> Balance { get; set; }
+        }
+
+        // Leave status
+
+        public class LeaveStatus
     {
         public string Status { get; set; }
         public decimal Amount { get; set; }
@@ -643,19 +774,28 @@ namespace GroupAPI.Controllers
         public string GroupId { get; set; }
     }
 
+    // Group member data
     public class GroupMemberData
     {
         public string UserId { get; set; }
         public string Name { get; set; }
     }
 
-    public class UserToPayData
-    {
-        public string UserId { get; set; }
-        public string Name { get; set; }
-        public decimal Amount { get; set; }
-    }
+        // User to pay data
 
+    //public class UserToPayData
+    //{
+    //        internal List<TransactionDebtData> Transactions;
+    //        internal SplitStatus Status;
+
+    //        public string UserId { get; set; }
+    //    public string Name { get; set; }
+    //    public decimal Amount { get; set; }
+    //        public object Value { get; internal set; }
+    //    }
+
+
+        // Transaction data
     public class TransactionData
     {
         public string Id { get; set; }
@@ -666,6 +806,7 @@ namespace GroupAPI.Controllers
         public string Category { get; set; }
     }
 
+        // Balance data
     public class BalanceData
     {
         public string UserId { get; set; }
@@ -674,6 +815,8 @@ namespace GroupAPI.Controllers
         public string Status { get; set; }
     }
 
+
+       //
 
     private string GenerateUniqueCode()
         {
@@ -722,6 +865,8 @@ namespace GroupAPI.Controllers
                 CreatorId = group.CreatorId;
             }
         }
+
+
 
         public class JoinRequestModel
         {
