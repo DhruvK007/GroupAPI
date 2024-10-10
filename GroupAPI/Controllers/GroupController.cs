@@ -690,12 +690,19 @@ namespace GroupAPI.Controllers
 
             foreach (var expense in expenses)
             {
-                if (balances.ContainsKey(expense.PaidById))
+                var unpaidSplits = expense.Splits.Where(s => s.IsPaid == SplitStatus.Unpaid || s.IsPaid == SplitStatus.PartiallyPaid);
+
+                if (!unpaidSplits.Any())
                 {
-                    balances[expense.PaidById] += expense.Amount;
+                    continue; // Skip this expense if all splits are paid
                 }
 
-                foreach (var split in expense.Splits)
+                if (balances.ContainsKey(expense.PaidById))
+                {
+                    balances[expense.PaidById] += unpaidSplits.Sum(s => s.Amount);
+                }
+
+                foreach (var split in unpaidSplits)
                 {
                     if (balances.ContainsKey(split.UserId))
                     {
@@ -704,13 +711,15 @@ namespace GroupAPI.Controllers
                 }
             }
 
-            return group.Members.Select(m => new BalanceData
-            {
-                UserId = m.UserId,
-                Name = m.User.Name,
-                Amount = balances[m.UserId],
-                Status = balances[m.UserId] > 0 ? "gets back" : (balances[m.UserId] < 0 ? "owes" : "settled")
-            }).ToList();
+            return group.Members
+                .Select(m => new BalanceData
+                {
+                    UserId = m.UserId,
+                    Name = m.User.Name,
+                    Amount = balances[m.UserId],
+                    Status = balances[m.UserId] > 0 ? "gets back" : (balances[m.UserId] < 0 ? "owes" : "settled")
+                })
+                .ToList(); // Return all members, even those with zero balance
         }
 
 
