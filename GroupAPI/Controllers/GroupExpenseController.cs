@@ -17,10 +17,11 @@ namespace GroupAPI.Controllers
     public class GroupExpenseController : ControllerBase
     {
         private readonly ApplicationDbContext _context;
-
-        public GroupExpenseController(ApplicationDbContext context)
+        private readonly ILogger<GroupExpenseController> _logger;
+        public GroupExpenseController(ApplicationDbContext context, ILogger<GroupExpenseController> logger)
         {
             _context = context;
+            _logger = logger;
         }
 
 
@@ -98,15 +99,15 @@ namespace GroupAPI.Controllers
         {
             if (!ModelState.IsValid)
             {
-                var errors = ModelState.SelectMany(x => x.Value.Errors)
-                                       .Select(x => x.ErrorMessage);
-                return BadRequest(new { Message = "Invalid data", Errors = errors });
+                return BadRequest(ModelState);
             }
 
             using var transaction = await _context.Database.BeginTransactionAsync();
 
             try
             {
+                _logger.LogInformation($"Starting SettleUp for GroupID: {request.GroupID}, PayerId: {request.PayerId}, RecipientId: {request.RecipientId}");
+
                 // Verify that both users are members of the group
                 var group = await _context.Groups
                     .Include(g => g.Members)
@@ -114,6 +115,7 @@ namespace GroupAPI.Controllers
 
                 if (group == null)
                 {
+                    _logger.LogWarning($"Group not found: {request.GroupID}");
                     return NotFound("Group not found.");
                 }
 
@@ -122,29 +124,28 @@ namespace GroupAPI.Controllers
 
                 if (payerMember == null || recipientMember == null)
                 {
+                    _logger.LogWarning($"Invalid members. PayerId: {request.PayerId}, RecipientId: {request.RecipientId}");
                     return BadRequest("Both users must be members of the group.");
                 }
 
-                // Fetch all relevant group expenses
-                var groupExpenses = await _context.GroupExpenses
-                    .Where(ge => request.ExpenseIds.Select(e => e.GroupExpenseId).Contains(ge.Id))
-                    .Where(ge => ge.GroupId == request.GroupID)
-                    .Where(ge => ge.PaidById == request.RecipientId)
-                    .Where(ge => ge.Status != ExpenseStatus.Cancelled)
-                    .Include(ge => ge.Splits)
-                    .ToListAsync();
-
-                foreach (var expense in request.ExpenseIds)
+                foreach (var expenseDetail in request.ExpenseIds)
                 {
-                    var groupExpense = groupExpenses.FirstOrDefault(ge => ge.Id == expense.GroupExpenseId);
+                    _logger.LogInformation($"Processing expense: {expenseDetail.GroupExpenseId}");
+
+                    var groupExpense = await _context.GroupExpenses
+                    .Include(ge => ge.Splits)
+                       .FirstOrDefaultAsync(ge => ge.Id == expenseDetail.GroupExpenseId && ge.GroupId == request.GroupID);
+
                     if (groupExpense == null)
                     {
+                        _logger.LogWarning($"GroupExpense not found: {expenseDetail.GroupExpenseId}");
                         continue;
                     }
 
                     var payerSplit = groupExpense.Splits.FirstOrDefault(s => s.UserId == request.PayerId);
                     if (payerSplit == null)
                     {
+                        _logger.LogWarning($"PayerSplit not found for expense: {expenseDetail.GroupExpenseId}");
                         continue;
                     }
 
@@ -152,34 +153,33 @@ namespace GroupAPI.Controllers
                     var payment = new Payment
                     {
                         ExpenseSplitId = payerSplit.Id,
-                        Amount = expense.Amount,
+                        Amount = expenseDetail.Amount,
                         PaidAt = request.TransactionDate
                     };
-                    await _context.Payments.AddAsync(payment);
+                    _context.Payments.Add(payment);
 
                     // Update split status
                     payerSplit.IsPaid = SplitStatus.Paid;
-                    _context.ExpenseSplits.Update(payerSplit);
+                    _context.Entry(payerSplit).State = EntityState.Modified;
 
                     // Update expense status
                     UpdateExpenseStatus(groupExpense);
-                    _context.GroupExpenses.Update(groupExpense);
+                    _context.Entry(groupExpense).State = EntityState.Modified;
+
+                    _logger.LogInformation($"Updated expense: {expenseDetail.GroupExpenseId}, New Status: {groupExpense.Status}");
                 }
 
-                await _context.SaveChangesAsync();
-
-                // Calculate total amount settled
-                decimal totalAmount = request.ExpenseIds.Sum(e => e.Amount);
-
-                // TODO: Implement sendSettleUpNotification method
-                // await SendSettleUpNotificationAsync(request.GroupID, request.PayerId, request.RecipientId, totalAmount);
+                var changes = await _context.SaveChangesAsync();
+                _logger.LogInformation($"Changes saved: {changes}");
 
                 await transaction.CommitAsync();
+                _logger.LogInformation("Transaction committed successfully");
 
-                return Ok(new { Message = "Payment to group member completed successfully!" });
+                return Ok(new { Message = "Payment to group member completed successfully!", ChangesCount = changes });
             }
             catch (Exception ex)
             {
+                _logger.LogError(ex, "Error occurred during SettleUp");
                 await transaction.RollbackAsync();
                 return StatusCode(500, $"An error occurred while settling up: {ex.Message}");
             }
@@ -202,7 +202,26 @@ namespace GroupAPI.Controllers
             {
                 expense.Status = ExpenseStatus.Unsettled;
             }
+
+            _logger.LogInformation($"Updated expense status: ExpenseId = {expense.Id}, NewStatus = {expense.Status}");
         }
+
+        public class SettleUpRequest
+        {
+            public string GroupID { get; set; }
+            public string PayerId { get; set; }
+            public string RecipientId { get; set; }
+            public List<ExpenseDetail> ExpenseIds { get; set; }
+            public DateTime TransactionDate { get; set; }
+        }
+
+        public class ExpenseDetail
+        {
+            public string ExpenseId { get; set; }
+            public decimal Amount { get; set; }
+            public string GroupExpenseId { get; set; }
+        }
+
 
         public class AddExpenseRequest
         {
@@ -221,20 +240,20 @@ namespace GroupAPI.Controllers
             public decimal Amount { get; set; }
         }
 
-        public class SettleUpRequest
-        {
-            public string GroupID { get; set; }
-            public string PayerId { get; set; }
-            public string RecipientId { get; set; }
-            public List<ExpenseDetail> ExpenseIds { get; set; }
-            public DateTime TransactionDate { get; set; }
-        }
+        //public class SettleUpRequest
+        //{
+        //    public string GroupID { get; set; }
+        //    public string PayerId { get; set; }
+        //    public string RecipientId { get; set; }
+        //    public List<ExpenseDetail> ExpenseIds { get; set; }
+        //    public DateTime TransactionDate { get; set; }
+        //}
 
-        public class ExpenseDetail
-        {
-            public string ExpenseId { get; set; }
-            public decimal Amount { get; set; }
-            public string GroupExpenseId { get; set; }
-        }
+        //public class ExpenseDetail
+        //{
+        //    public string ExpenseId { get; set; }
+        //    public decimal Amount { get; set; }
+        //    public string GroupExpenseId { get; set; }
+        //}
     }
 }

@@ -583,7 +583,7 @@ namespace GroupAPI.Controllers
                 .Select(es => new
                 {
                     Id = es.Id,
-                    GroupExpenseId = es.Id,
+                    GroupExpenseId = es.ExpenseId,
                     MemberName = es.PaidByName,
                     MemberId = es.PaidById,
                     AmountToPay = es.Amount - es.Payments.Sum(p => p.Amount),
@@ -671,47 +671,52 @@ namespace GroupAPI.Controllers
 
         private async Task<List<BalanceData>> FetchGroupBalances(string groupId)
         {
+            var group = await _context.Groups
+                .Include(g => g.Members)
+                    .ThenInclude(m => m.User)
+                .FirstOrDefaultAsync(g => g.Id == groupId);
+
+            if (group == null)
+            {
+                return new List<BalanceData>();
+            }
+
             var expenses = await _context.GroupExpenses
-                .Where(ge => ge.GroupId == groupId)
+                .Where(ge => ge.GroupId == groupId && ge.Status != ExpenseStatus.Settled)
                 .Include(ge => ge.Splits)
                 .ToListAsync();
 
-            var balances = new Dictionary<string, decimal>();
+            var balances = group.Members.ToDictionary(m => m.UserId, _ => 0m);
 
             foreach (var expense in expenses)
             {
-                if (!balances.ContainsKey(expense.PaidById))
+                if (balances.ContainsKey(expense.PaidById))
                 {
-                    balances[expense.PaidById] = 0;
+                    balances[expense.PaidById] += expense.Amount;
                 }
-                balances[expense.PaidById] += expense.Amount;
 
                 foreach (var split in expense.Splits)
                 {
-                    if (!balances.ContainsKey(split.UserId))
+                    if (balances.ContainsKey(split.UserId))
                     {
-                        balances[split.UserId] = 0;
+                        balances[split.UserId] -= split.Amount;
                     }
-                    balances[split.UserId] -= split.Amount;
                 }
             }
 
-            var users = await _context.Users
-                .Where(u => balances.Keys.Contains(u.Id))
-                .ToDictionaryAsync(u => u.Id, u => u);
-
-            return balances.Select(kvp => new BalanceData
+            return group.Members.Select(m => new BalanceData
             {
-                UserId = kvp.Key,
-                Name = users[kvp.Key].Name,
-                Amount = kvp.Value,
-                Status = kvp.Value > 0 ? "gets back" : "owes"
+                UserId = m.UserId,
+                Name = m.User.Name,
+                Amount = balances[m.UserId],
+                Status = balances[m.UserId] > 0 ? "gets back" : (balances[m.UserId] < 0 ? "owes" : "settled")
             }).ToList();
         }
 
 
+
         // Get detailed list of users you need to pay
-       
+
 
 
         // Transaction data
